@@ -7,25 +7,34 @@ export default defineConfig({
   plugins: [
     react(),
     VitePWA({
+      // auto-update the service worker when you push a new build
       registerType: "autoUpdate",
-      includeAssets: ["/icon-192.png", "/icon-512.png"],
+
+      // only include assets you actually have in /public
+      includeAssets: ["icon-192.png", "icon-512.png"],
+
       manifest: {
         name: "Street-Smart Wealth Tracker",
-        short_name: "Wealth",
+        short_name: "Wealth Tracker",
         start_url: "/",
         display: "standalone",
-        background_color: "#f1f5f9",
+        background_color: "#0f172a",
         theme_color: "#0f172a",
+        orientation: "portrait-primary",
         icons: [
           { src: "/icon-192.png", sizes: "192x192", type: "image/png" },
           { src: "/icon-512.png", sizes: "512x512", type: "image/png" }
         ]
       },
+
+      // sensible defaults: cache static assets; let HTML go to network
       workbox: {
-        // Good defaults: cache static assets, fall back to network for HTML
-        navigateFallback: "/index.html"
+        navigateFallback: "/index.html",
+        globPatterns: ["**/*.{js,css,html,ico,png,svg}"]
       }
     })
   ],
+
+  // keep your alias
   resolve: { alias: { "@": path.resolve(__dirname, "./src") } }
 });
