@@ -12,7 +12,8 @@ export default defineConfig({
 
       // only include assets you actually have in /public
       includeAssets: ["icon-192.png", "icon-512.png"],
-
+      injectRegister: "auto",
+      registerType: "autoUpdate",
       manifest: {
         name: "Street-Smart Wealth Tracker",
         short_name: "Wealth Tracker",
@@ -26,7 +27,6 @@ export default defineConfig({
           { src: "/icon-512.png", sizes: "512x512", type: "image/png" }
         ]
       },
-
       // sensible defaults: cache static assets; let HTML go to network
       workbox: {
         navigateFallback: "/index.html",
