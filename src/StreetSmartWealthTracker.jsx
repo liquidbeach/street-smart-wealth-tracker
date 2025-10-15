@@ -157,6 +157,21 @@ export default function StreetSmartWealthTracker() {
     }
   }, []);
 
+  const plannedSplits = useMemo(() => {
+    const budget = Math.max(0, Number(planner.budget) || 0);
+    const fees = Math.max(0, Number(planner.fees) || 0);
+    const bufferPct = Math.max(0, Number(planner.bufferPct) || 0);
+    const spendable = Math.max(0, budget - fees - budget * (bufferPct / 100));
+    if (spendable <= 0) return [];
+    
+    const totalWeights = assets.reduce((s, a) => s + (a.targetWeight || 0), 0) || 1;
+      return assets.map((a) => {
+      const amount = spendable * ((a.targetWeight || 0) / totalWeights);
+      const units = a.price > 0 ? amount / a.price : null; // null if no price
+      return { ticker: a.ticker, name: a.name, weight: a.targetWeight, amount, units, price: a.price };
+    });
+  }, [planner, assets]);
+  
   const totals = useMemo(() => {
     const invested = assets.reduce((s, a) => s + (a.invested || 0), 0);
     const value = assets.reduce((s, a) => s + (a.units * (a.price || 0)), 0);
@@ -364,28 +379,34 @@ export default function StreetSmartWealthTracker() {
         	<p className="text-sm text-muted-foreground">Local‑first · ETFs + Gold · Aussie CGT (basic) · No fluff.</p>
         </div>
         <div className="flex flex-wrap gap-2 items-center">
-          <Button variant="ghost" className="gap-2" onClick={() => setTheme(t => (t === "dark" ? "light" : "dark"))}>
+          <Button variant="ghost" size="sm" className="gap-1" onClick={() => setTheme(t => (t === "dark" ? "light" : "dark"))}>
             {theme === "dark" ? <Sun className="h-4 w-4"/> : <Moon className="h-4 w-4"/>}
-            <span className="text-sm">{theme === "dark" ? "Light" : "Dark"} mode</span>
+            <span className="text-sm hidden sm:inline">{theme === "dark" ? "Light" : "Dark"} mode</span>
           </Button>
-          <Button variant="secondary" onClick={exportCSV} className="gap-2"><Download className="h-4 w-4"/>CSV</Button>
-          <Button variant="secondary" onClick={exportJSON} className="gap-2"><Download className="h-4 w-4"/>Backup JSON</Button>
+          <Button variant="secondary" size="sm" onClick={exportCSV} className="gap-1">
+           <Download className="h-4 w-4"/><span className="hidden sm:inline">CSV</span>
+          </Button>
+          <Button variant="secondary" size="sm" onClick={() => fileInputRef.current?.click()} className="gap-1">
+             <Upload className="h-4 w-4"/><span className="hidden sm:inline">Import</span>
+          </Button>
           <Button variant="secondary" onClick={() => fileInputRef.current?.click()} className="gap-2"><Upload className="h-4 w-4"/>Import</Button>
           <input ref={fileInputRef} type="file" accept="application/json" className="hidden" onChange={onImportFile} />
-          <Button variant={confirmReset ? "destructive" : "outline"} onClick={resetAll} className="gap-2">
+          <Button variant={confirmReset ? "destructive" : "outline"} size="sm" onClick={resetAll} className="gap-1">
             <Trash2 className="h-4 w-4"/>{confirmReset ? "Confirm reset" : "Reset"}
           </Button>
         </div>
       </header>
 
       <Tabs defaultValue="planner">
-        <TabsList className="grid grid-cols-2 sm:grid-cols-4 lg:grid-cols-5 w-full">
-          <TabsTrigger value="planner">Planner</TabsTrigger>
-          <TabsTrigger value="portfolio">Portfolio</TabsTrigger>
-          <TabsTrigger value="prices">Prices</TabsTrigger>
-          <TabsTrigger value="cgt">CGT</TabsTrigger>
-          <TabsTrigger value="settings">Settings</TabsTrigger>
-        </TabsList>
+        <div className="w-full overflow-x-auto">
+          <TabsList className="inline-flex w-max gap-1 px-1">
+            <TabsTrigger className="shrink-0" value="planner">Planner</TabsTrigger>
+            <TabsTrigger className="shrink-0" value="portfolio">Portfolio</TabsTrigger>
+            <TabsTrigger className="shrink-0" value="prices">Prices</TabsTrigger>
+            <TabsTrigger className="shrink-0" value="cgt">CGT</TabsTrigger>
+            <TabsTrigger className="shrink-0" value="settings">Settings</TabsTrigger>
+          </TabsList>
+       </div>
 
         {/* Planner */}
         <TabsContent value="planner" className="mt-4">
@@ -411,6 +432,44 @@ export default function StreetSmartWealthTracker() {
               <div className="flex flex-wrap gap-2 mt-4">
                 <Button className="gap-2" onClick={allocateBudget}><Plus className="h-4 w-4"/>Allocate Now</Button>
               </div>
+
+              {/* Live preview of planned splits (doesn't change state until Apply) */}
+              <div className="mt-4">
+                <div className="mb-2 text-sm text-muted-foreground">
+                  Preview based on your Budget, Fees and Buffer. Amounts always shown; units appear if a price is set.
+                </div>
+                <div className="overflow-x-auto">
+                  <table className="w-full text-sm">
+                    <thead className="text-left text-muted-foreground">
+                      <tr>
+                        <th className="py-2 pr-3">Ticker</th>
+                        <th className="py-2 pr-3">Target</th>
+                        <th className="py-2 pr-3">Amount</th>
+                        <th className="py-2 pr-3">Units (est)</th>
+                      </tr>
+                    </thead>
+                    <tbody>
+                      {plannedSplits.map((row) => (
+                        <tr key={row.ticker} className="border-t">
+                          <td className="py-2 pr-3 font-medium">{row.ticker}</td>
+                          <td className="py-2 pr-3">{(row.weight * 100).toFixed(0)}%</td>
+                          <td className="py-2 pr-3">{formatCurrency(row.amount)}</td>
+                          <td className="py-2 pr-3">
+                            {row.units != null ? row.units.toFixed(4) : <span className="text-muted-foreground">— set price</span>}
+                          </td>
+                        </tr>
+                      ))}
+                    </tbody>
+                  </table>
+                </div>
+
+                <div className="flex justify-end mt-3">
+                  <Button onClick={allocateBudget} size="sm" className="gap-2">
+                    <Plus className="h-4 w-4" /> Apply buys
+                  </Button>
+                </div>
+              </div>
+              
               <div className="mt-6 grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 gap-4">
                 {assets.map(a => {
                   const value = (a.units || 0) * (a.price || 0);
