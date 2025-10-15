@@ -398,18 +398,17 @@ export default function StreetSmartWealthTracker() {
       </header>
 
       <Tabs defaultValue="planner">
-        <div className="w-full overflow-x-auto">
-          <TabsList className="inline-flex w-max gap-1 px-1">
-            <TabsTrigger className="shrink-0" value="planner">Planner</TabsTrigger>
-            <TabsTrigger className="shrink-0" value="portfolio">Portfolio</TabsTrigger>
-            <TabsTrigger className="shrink-0" value="prices">Prices</TabsTrigger>
-            <TabsTrigger className="shrink-0" value="cgt">CGT</TabsTrigger>
-            <TabsTrigger className="shrink-0" value="settings">Settings</TabsTrigger>
+        <div className="w-full overflow-x-auto mb-3">
+          <TabsList className="inline-flex w-max gap-1 px-1 py-1">
+            <TabsTrigger className="shrink-0 px-3 py-2 text-sm" value="planner">Plan</TabsTrigger>
+            <TabsTrigger className="shrink-0 px-3 py-2 text-sm" value="portfolio">Holdings</TabsTrigger>
+            <TabsTrigger className="shrink-0 px-3 py-2 text-sm" value="prices">Prices</TabsTrigger>
+            <TabsTrigger className="shrink-0 px-3 py-2 text-sm" value="cgt">CGT</TabsTrigger>
+            <TabsTrigger className="shrink-0 px-3 py-2 text-sm" value="settings">Settings</TabsTrigger>
           </TabsList>
-       </div>
-
+        </div>
         {/* Planner */}
-        <TabsContent value="planner" className="mt-4">
+        <TabsContent value="planner">
           <Card className="border rounded-2xl">
             <CardContent className="p-4 sm:p-6">
               <div className="grid grid-cols-1 sm:grid-cols-3 gap-4">
