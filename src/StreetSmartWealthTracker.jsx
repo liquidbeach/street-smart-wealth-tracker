@@ -105,6 +105,25 @@ function cgtSmokeTest() {
   return Array.isArray(sells) && sells.length === 0;
 }
 
+function whatIfSell(ticker, amountAUD) {
+  const a = assets.find(x => x.ticker === ticker);
+  if (!a || !a.price || amountAUD <= 0) return null;
+  const units = amountAUD / a.price;
+  const { consumed, unfilled } = consumeLotsFIFO(a.lots, units);
+  if (unfilled > 1e-9) return { error: "Insufficient units for this what-if." };
+
+  const proceeds = units * a.price;
+  const saleDate = new Date();
+  const costBase = consumed.reduce((s, l) => s + l.qty * l.price, 0);
+  const grossGain = Math.max(0, proceeds - costBase);
+  const discountGain = consumed.reduce((acc, l) => {
+    const heldYears = yearsBetween(new Date(l.date), saleDate);
+    const lGain = l.qty * Math.max(0, (a.price - l.price));
+    return acc + (heldYears >= 1 ? 0.5 * lGain : lGain);
+  }, 0);
+  return { units, proceeds, costBase, grossGain, discountGain };
+}
+
 export default function StreetSmartWealthTracker() {
   // THEME --------------------------------------------------------------------
   const [theme, setTheme] = useState(() => localStorage.getItem(THEME_KEY) || "light");
@@ -143,6 +162,12 @@ export default function StreetSmartWealthTracker() {
   const [rebalance, setRebalance] = useState({ enabled: true, thresholdPct: 5 });
   const [confirmReset, setConfirmReset] = useState(false);
   const fileInputRef = useRef(null);
+  const [whatIfTicker, setWhatIfTicker] = useState("VGS");
+  const [whatIfAmount, setWhatIfAmount] = useState("");
+  const [whatIfResult, setWhatIfResult] = useState(null);
+  const [priceDraft, setPriceDraft] = useState({});
+  const [unitsMode, setUnitsMode] = useState(false);
+  const [plannedUnits, setPlannedUnits] = useState({}); // { [ticker]: "123.45" }
 
   useEffect(() => {
     localStorage.setItem(STORAGE_KEY, JSON.stringify({ assets, transactions: txn }));
@@ -163,12 +188,12 @@ export default function StreetSmartWealthTracker() {
     const bufferPct = Math.max(0, Number(planner.bufferPct) || 0);
     const spendable = Math.max(0, budget - fees - budget * (bufferPct / 100));
     if (spendable <= 0) return [];
-    
+
     const totalWeights = assets.reduce((s, a) => s + (a.targetWeight || 0), 0) || 1;
-      return assets.map((a) => {
+    return assets.map((a, i) => {
       const amount = spendable * ((a.targetWeight || 0) / totalWeights);
-      const units = a.price > 0 ? amount / a.price : null; // null if no price
-      return { ticker: a.ticker, name: a.name, weight: a.targetWeight, amount, units, price: a.price };
+      const units = a.price > 0 ? amount / a.price : null; // show null if no price set
+      return { idx: i, ticker: a.ticker, name: a.name, weight: a.targetWeight, amount, units, price: a.price };
     });
   }, [planner, assets]);
   
@@ -189,6 +214,23 @@ export default function StreetSmartWealthTracker() {
     const out = deltas.filter(d => Math.abs(d.diffPct) >= (rebalance.thresholdPct || 0));
     return out.sort((a, b) => Math.abs(b.diffPct) - Math.abs(a.diffPct));
   }, [assets, totals, rebalance]);
+
+  const rebalancePlan = useMemo(() => {
+  const total = totals.value || 0;
+  return assets.map(a => {
+    const current = (a.units || 0) * (a.price || 0);
+    const targetValue = total * (a.targetWeight || 0);
+    const delta = targetValue - current; // +buy / -sell
+    return {
+      ticker: a.ticker,
+      name: a.name,
+      currentValue: current,
+      targetValue,
+      delta,
+      weightNow: total > 0 ? current / total : 0,
+    };
+  }).sort((x, y) => Math.abs(y.delta) - Math.abs(x.delta));
+  }, [assets, totals.value]);
 
   function updateAsset(ticker, patch) {
     setAssets(prev => prev.map(a => (a.ticker === ticker ? { ...a, ...patch } : a)));
@@ -219,6 +261,31 @@ export default function StreetSmartWealthTracker() {
       firstContribution: a.firstContribution || lot.date,
     });
     addTransaction({ kind: "BUY", ticker, amount: amt, units, price: a.price, date: new Date().toISOString() });
+  }
+
+  function commitPlanBuys() {
+    // We commit what's visible in the planner table:
+    // - In Amount mode: we take computed row.amount
+    // - In Units mode: we take user-entered plannedUnits[ticker] * current price
+    plannedSplits.forEach((row) => {
+      const price = row.price || 0;
+      if (price <= 0) return; // can’t buy without a price
+
+      let amount = 0;
+      if (unitsMode) {
+        const u = Number(plannedUnits[row.ticker] || 0);
+        if (u > 0) amount = u * price;
+      } else {
+        amount = row.amount || 0;
+      }
+
+      if (amount > 0) {
+        handleBuy(row.ticker, amount); // this persists via existing localStorage effect
+      }
+    });
+
+    // Clear any per-row units overrides after committing
+    setPlannedUnits({});
   }
 
   function handleSell(ticker, amount) {
@@ -402,125 +469,179 @@ export default function StreetSmartWealthTracker() {
           <TabsList className="inline-flex w-max gap-1 px-1 py-1">
             <TabsTrigger className="shrink-0 px-3 py-2 text-sm" value="planner">Plan</TabsTrigger>
             <TabsTrigger className="shrink-0 px-3 py-2 text-sm" value="portfolio">Holdings</TabsTrigger>
-            <TabsTrigger className="shrink-0 px-3 py-2 text-sm" value="prices">Prices</TabsTrigger>
+            <TabsTrigger className="shrink-0 px-3 py-2 text-sm" value="summary">Summary</TabsTrigger>
             <TabsTrigger className="shrink-0 px-3 py-2 text-sm" value="cgt">CGT</TabsTrigger>
             <TabsTrigger className="shrink-0 px-3 py-2 text-sm" value="settings">Settings</TabsTrigger>
           </TabsList>
+        </div>
+        <div className="mt-3 flex items-center gap-3">
+          <Label className="text-sm">Mode:</Label>
+          <div className="flex items-center gap-2 text-sm">
+            <Button
+              variant={unitsMode ? "outline" : "default"}
+              size="sm"
+              onClick={() => setUnitsMode(false)}
+            >
+              Amount
+            </Button>
+            <Button
+              variant={unitsMode ? "default" : "outline"}
+              size="sm"
+              onClick={() => setUnitsMode(true)}
+            >
+              Units
+            </Button>
+          </div>
         </div>
         {/* Planner */}
         <TabsContent value="planner">
           <Card className="border rounded-2xl">
             <CardContent className="p-4 sm:p-6">
-              <div className="grid grid-cols-1 sm:grid-cols-3 gap-4">
+              {/* Inputs — compact widths */}
+              <div className="grid grid-cols-2 sm:grid-cols-3 gap-4">
                 <div>
                   <Label>Budget (AUD)</Label>
-                  <Input inputMode="decimal" placeholder="0" value={planner.budget}
-                         onChange={e => setPlanner(p => ({ ...p, budget: e.target.value }))}/>
+                  <Input inputMode="decimal" className="w-36 sm:w-40"
+                        placeholder="0" value={planner.budget}
+                        onChange={e => setPlanner(p => ({ ...p, budget: e.target.value }))}/>
                 </div>
                 <div>
-                  <Label>Fees (flat)</Label>
-                  <Input inputMode="decimal" placeholder="0" value={planner.fees}
-                         onChange={e => setPlanner(p => ({ ...p, fees: e.target.value }))}/>
+                  <Label>Fees</Label>
+                  <Input inputMode="decimal" className="w-28 sm:w-32"
+                        placeholder="0" value={planner.fees}
+                        onChange={e => setPlanner(p => ({ ...p, fees: e.target.value }))}/>
                 </div>
                 <div>
                   <Label>Buffer %</Label>
-                  <Input inputMode="decimal" placeholder="0" value={planner.bufferPct}
-                         onChange={e => setPlanner(p => ({ ...p, bufferPct: e.target.value }))}/>
+                  <Input inputMode="decimal" className="w-24 sm:w-28"
+                        placeholder="0" value={planner.bufferPct}
+                        onChange={e => setPlanner(p => ({ ...p, bufferPct: e.target.value }))}/>
                 </div>
               </div>
-              <div className="flex flex-wrap gap-2 mt-4">
-                <Button className="gap-2" onClick={allocateBudget}><Plus className="h-4 w-4"/>Allocate Now</Button>
-              </div>
 
-              {/* Live preview of planned splits (doesn't change state until Apply) */}
+              {/* Live split preview */}
               <div className="mt-4">
                 <div className="mb-2 text-sm text-muted-foreground">
-                  Preview based on your Budget, Fees and Buffer. Amounts always shown; units appear if a price is set.
+                  Split preview by target weights. Units show when a price is set.
                 </div>
                 <div className="overflow-x-auto">
                   <table className="w-full text-sm">
                     <thead className="text-left text-muted-foreground">
                       <tr>
-                        <th className="py-2 pr-3">Ticker</th>
-                        <th className="py-2 pr-3">Target</th>
-                        <th className="py-2 pr-3">Amount</th>
-                        <th className="py-2 pr-3">Units (est)</th>
+                          <th className="py-2 pr-3">Ticker</th>
+                          <th className="py-2 pr-3">Target</th>
+                          <th className="py-2 pr-3">Price</th>
+                          {!unitsMode ? (
+                            <>
+                              <th className="py-2 pr-3">Amount</th>
+                              <th className="py-2 pr-3">Units (est)</th>
+                            </>
+                          ) : (
+                            <>
+                              <th className="py-2 pr-3">Units</th>
+                              <th className="py-2 pr-3">Amount (est)</th>
+                            </>
+                          )}
                       </tr>
                     </thead>
                     <tbody>
-                      {plannedSplits.map((row) => (
-                        <tr key={row.ticker} className="border-t">
-                          <td className="py-2 pr-3 font-medium">{row.ticker}</td>
-                          <td className="py-2 pr-3">{(row.weight * 100).toFixed(0)}%</td>
-                          <td className="py-2 pr-3">{formatCurrency(row.amount)}</td>
-                          <td className="py-2 pr-3">
-                            {row.units != null ? row.units.toFixed(4) : <span className="text-muted-foreground">— set price</span>}
-                          </td>
-                        </tr>
-                      ))}
+                      {plannedSplits.map((row) => {
+                          const price = row.price || 0;
+
+                          // derive dynamic display values for both modes
+                          const overrideUnits = plannedUnits[row.ticker];
+                          const unitsInUnitsMode =
+                            overrideUnits !== undefined ? Number(overrideUnits) || 0 : (price > 0 ? (row.amount / price) : 0);
+                          const amountInUnitsMode = price > 0 ? unitsInUnitsMode * price : 0;
+
+                          return (
+                            <tr key={row.ticker} className="border-t">
+                              <td className="py-2 pr-3 font-medium">{row.ticker}</td>
+                              <td className="py-2 pr-3">{(row.weight * 100).toFixed(0)}%</td>
+
+                              {/* Price cell (inline edit if empty or on 'edit') */}
+                              <td className="py-2 pr-3">
+                                {price > 0 ? (
+                                  <div className="flex items-center gap-2">
+                                    <span>{formatCurrency(price)}</span>
+                                    <button
+                                      className="text-xs underline text-muted-foreground"
+                                      onClick={() => setPriceDraft((d) => ({ ...d, [row.ticker]: String(price) }))}
+                                      title="Edit price"
+                                    >
+                                      edit
+                                    </button>
+                                  </div>
+                                ) : null}
+
+                                {(price <= 0 || priceDraft[row.ticker] !== undefined) && (
+                                  <div className="flex items-center gap-2 mt-1">
+                                    <Input
+                                      inputMode="decimal"
+                                      className="w-24"
+                                      placeholder="Set price"
+                                      value={priceDraft[row.ticker] ?? ""}
+                                      onChange={(e) =>
+                                        setPriceDraft((d) => ({ ...d, [row.ticker]: e.target.value }))
+                                      }
+                                      onBlur={(e) => {
+                                        const p = Math.max(0, Number(e.target.value) || 0);
+                                        if (p > 0) updateAsset(row.ticker, { price: p });
+                                        setPriceDraft((d) => {
+                                          const { [row.ticker]: _, ...rest } = d;
+                                          return rest;
+                                        });
+                                      }}
+                                    />
+                                  </div>
+                                )}
+                              </td>
+
+                              {/* Amount vs Units cells depending on mode */}
+                              {!unitsMode ? (
+                                <>
+                                  <td className="py-2 pr-3">{formatCurrency(row.amount)}</td>
+                                  <td className="py-2 pr-3">
+                                    {row.units != null
+                                      ? row.units.toFixed(4)
+                                      : (price > 0
+                                          ? (row.amount / price).toFixed(4)
+                                          : <span className="text-muted-foreground">set price</span>)}
+                                  </td>
+                                </>
+                              ) : (
+                                <>
+                                  <td className="py-2 pr-3">
+                                    <Input
+                                      inputMode="decimal"
+                                      className="w-28"
+                                      placeholder={(price > 0 && row.amount > 0) ? (row.amount / price).toFixed(4) : ""}
+                                      value={overrideUnits ?? ""}
+                                      onChange={(e) =>
+                                        setPlannedUnits((m) => ({ ...m, [row.ticker]: e.target.value }))
+                                      }
+                                    />
+                                  </td>
+                                  <td className="py-2 pr-3">
+                                    {price > 0
+                                      ? formatCurrency(amountInUnitsMode)
+                                      : <span className="text-muted-foreground">set price</span>}
+                                  </td>
+                                </>
+                              )}
+                            </tr>
+                          );
+                        })}
                     </tbody>
                   </table>
                 </div>
-
                 <div className="flex justify-end mt-3">
-                  <Button onClick={allocateBudget} size="sm" className="gap-2">
-                    <Plus className="h-4 w-4" /> Apply buys
+                  <Button onClick={commitPlanBuys} size="sm" className="gap-2">
+                    <Plus className="h-4 w-4" /> Commit to Ledger
                   </Button>
-                </div>
+                  </div>
               </div>
-              
-              <div className="mt-6 grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 gap-4">
-                {assets.map(a => {
-                  const value = (a.units || 0) * (a.price || 0);
-                  const weight = totals.value > 0 ? value / totals.value : 0;
-                  const cagr = getCAGR(a);
-                  return (
-                    <Card key={a.ticker} className="rounded-2xl">
-                      <CardContent className="p-4">
-                        <div className="flex items-center justify-between">
-                          <div>
-                            <div className="font-semibold">{a.name}</div>
-                            <div className="text-xs text-muted-foreground">Target {(a.targetWeight*100).toFixed(0)}% · Current {(weight*100).toFixed(1)}%</div>
-                          </div>
-                          {rebalance.enabled && Math.abs((weight - a.targetWeight) * 100) >= rebalance.thresholdPct && (
-                            <span className="text-xs px-2 py-1 rounded-full bg-amber-100 text-amber-900 flex items-center gap-1"><AlertTriangle className="h-3 w-3"/>Rebalance</span>
-                          )}
-                        </div>
-                        <div className="mt-3 grid grid-cols-2 gap-3 text-sm">
-                          <div>
-                            <div className="text-muted-foreground">Units</div>
-                            <div className="font-medium">{(a.units||0).toFixed(4)}</div>
-                          </div>
-                          <div>
-                            <div className="text-muted-foreground">Price</div>
-                            <div className="font-medium">{formatCurrency(a.price||0)}</div>
-                          </div>
-                          <div>
-                            <div className="text-muted-foreground">Invested</div>
-                            <div className="font-medium">{formatCurrency(a.invested||0)}</div>
-                          </div>
-                          <div>
-                            <div className="text-muted-foreground">Value</div>
-                            <div className="font-medium">{formatCurrency(value)}</div>
-                          </div>
-                          <div>
-                            <div className="text-muted-foreground">CAGR</div>
-                            <div className="font-medium">{(cagr*100).toFixed(2)}%</div>
-                          </div>
-                          <div>
-                            <div className="text-muted-foreground">Δ vs Target</div>
-                            <div className="font-medium">{((weight - a.targetWeight)*100).toFixed(1)}%</div>
-                          </div>
-                        </div>
-                        <div className="mt-4 grid grid-cols-2 gap-2">
-                          <Button variant="outline" onClick={() => handleBuy(a.ticker, 1000)}>Buy $1k</Button>
-                          <Button variant="outline" onClick={() => handleSell(a.ticker, 1000)}>Sell $1k</Button>
-                        </div>
-                      </CardContent>
-                    </Card>
-                  );
-                })}
-              </div>
+              {/* Note: no Buy/Sell, no CAGR, no rebalance flags in Planner */}
             </CardContent>
           </Card>
         </TabsContent>
@@ -605,7 +726,6 @@ export default function StreetSmartWealthTracker() {
               </CardContent>
             </Card>
           </div>
-
           <Card className="mt-4 rounded-2xl">
             <CardContent className="p-4 sm:p-6">
               <h2 className="font-semibold mb-2">Transactions</h2>
@@ -647,36 +767,61 @@ export default function StreetSmartWealthTracker() {
           </Card>
         </TabsContent>
 
-        {/* Prices */}
-        <TabsContent value="prices" className="mt-4">
+        {/* Summary */}
+        <TabsContent value="summary">
           <Card className="rounded-2xl">
-            <CardContent className="p-4 sm:p-6 space-y-4">
-              <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 gap-4">
-                {assets.map(a => (
-                  <div key={a.ticker} className="p-3 border rounded-xl flex flex-col gap-3">
-                    <div className="flex items-center justify-between">
-                      <div className="font-semibold">{a.ticker}</div>
-                      <div className="text-xs text-muted-foreground">{a.name}</div>
-                    </div>
-                    <div className="grid grid-cols-2 gap-3">
-                      <div>
-                        <Label>Price (AUD)</Label>
-                        <Input inputMode="decimal" value={a.price}
-                               onChange={e => handleManualPrice(a.ticker, e.target.value)} />
-                      </div>
-                      <div>
-                        <Label>Target Weight %</Label>
-                        <Input inputMode="decimal" value={(a.targetWeight*100).toFixed(2)}
-                               onChange={e => updateAsset(a.ticker, { targetWeight: Math.max(0, Number(e.target.value)||0)/100 })} />
-                      </div>
-                    </div>
-                    <div className="grid grid-cols-2 gap-2">
-                      <Button variant="outline" onClick={() => handleBuy(a.ticker, 500)}>Buy $500</Button>
-                      <Button variant="outline" onClick={() => handleSell(a.ticker, 500)}>Sell $500</Button>
-                    </div>
-                  </div>
-                ))}
+            <CardContent className="p-4 sm:p-6 space-y-3">
+              <h2 className="font-semibold">Summary & Rebalance</h2>
+              <div className="text-sm text-muted-foreground">
+                Total Value: <span className="font-medium">{formatCurrency(totals.value)}</span>
               </div>
+              <div className="overflow-x-auto">
+                <table className="w-full text-sm">
+                  <thead className="text-left text-muted-foreground">
+                    <tr>
+                      <th className="py-2 pr-3">Ticker</th>
+                      <th className="py-2 pr-3">Target</th>
+                      <th className="py-2 pr-3">Current</th>
+                      <th className="py-2 pr-3">Δ Weight</th>
+                      <th className="py-2 pr-3">Δ Amount</th>
+                      <th className="py-2 pr-3">Invested</th>
+                      <th className="py-2 pr-3">P/L</th>
+                    </tr>
+                  </thead>
+                  <tbody>
+                  <tbody>
+                    {rebalancePlan.map((r) => {
+                      const asset = assets.find(a => a.ticker === r.ticker);
+                      const invested = asset?.invested || 0;
+                      const pl = r.currentValue - invested;
+
+                      const targetPct = (asset?.targetWeight || 0) * 100;
+                      const currentPct = (r.weightNow * 100);
+                      const deltaPct = currentPct - targetPct;
+
+                      return (
+                        <tr key={r.ticker} className="border-t">
+                          <td className="py-2 pr-3 font-medium">{r.ticker}</td>
+                          <td className="py-2 pr-3">{targetPct.toFixed(0)}%</td>
+                          <td className="py-2 pr-3">{currentPct.toFixed(1)}%</td>
+                          <td className="py-2 pr-3">{deltaPct.toFixed(1)}%</td>
+                          <td className={`py-2 pr-3 ${r.delta > 0 ? "text-emerald-600" : r.delta < 0 ? "text-rose-600" : ""}`}>
+                            {r.delta === 0 ? "—" : (r.delta > 0 ? "Buy " : "Sell ") + formatCurrency(Math.abs(r.delta))}
+                          </td>
+                          <td className="py-2 pr-3">{formatCurrency(invested)}</td>
+                          <td className={`py-2 pr-3 ${pl >= 0 ? "text-emerald-600" : "text-rose-600"}`}>
+                            {formatCurrency(pl)}
+                          </td>
+                        </tr>
+                      );
+                    })}
+                  </tbody>
+                  </tbody>
+                </table>
+              </div>
+              <p className="text-xs text-muted-foreground">
+                “Δ Amount” shows how much to buy/sell to match targets at current prices.
+              </p>
             </CardContent>
           </Card>
         </TabsContent>
@@ -694,6 +839,31 @@ export default function StreetSmartWealthTracker() {
                 <div className="flex items-end">
                   <div className="text-sm text-muted-foreground">FY {fyYear}-{String((fyYear+1)).slice(2)} · Events {fy.events}</div>
                 </div>
+              </div>
+              <div className="p-3 border rounded-xl">
+                <div className="mb-2 font-medium">What-if Sell</div>
+                <div className="grid grid-cols-1 sm:grid-cols-3 gap-3 items-end">
+                  <div>
+                    <Label>Ticker</Label>
+                    <Input placeholder="e.g., VGS" value={whatIfTicker} onChange={e => setWhatIfTicker(e.target.value.toUpperCase())}/>
+                  </div>
+                  <div>
+                    <Label>Sell Amount (AUD)</Label>
+                    <Input inputMode="decimal" placeholder="1000" value={whatIfAmount} onChange={e => setWhatIfAmount(e.target.value)}/>
+                  </div>
+                  <div>
+                    <Button className="w-full" onClick={() => setWhatIfResult(whatIfSell(whatIfTicker, Number(whatIfAmount)||0))}>Calculate</Button>
+                  </div>
+                </div>
+                {whatIfResult && !whatIfResult.error && (
+                  <div className="mt-3 text-sm grid grid-cols-2 sm:grid-cols-4 gap-2">
+                    <div>Units: <span className="font-medium">{whatIfResult.units.toFixed(6)}</span></div>
+                    <div>Proceeds: <span className="font-medium">{formatCurrency(whatIfResult.proceeds)}</span></div>
+                    <div>Cost Base: <span className="font-medium">{formatCurrency(whatIfResult.costBase)}</span></div>
+                    <div>Discount Gain: <span className="font-medium">{formatCurrency(whatIfResult.discountGain)}</span></div>
+                  </div>
+                )}
+                {whatIfResult?.error && <div className="mt-2 text-sm text-rose-600">{whatIfResult.error}</div>}
               </div>
               <div className="p-3 rounded-xl bg-slate-100 dark:bg-slate-800/40 border border-slate-200 dark:border-slate-700">
                 <div className="text-sm">Gross Gains (no losses netting): <span className="font-medium">{formatCurrency(fy.grossGain)}</span></div>
